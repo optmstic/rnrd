@@ -18,8 +18,6 @@ Everything is delivered in a single idempotent T-SQL script that can be executed
 |---|---|
 | `auction.sql` | Main deliverable. Idempotent T-SQL script containing the Auction schema (tables + stored procedures) and the store expansion analytical queries. |
 | `report.md` | Project report in Markdown with full documentation of the solution design, assumptions, methodology, results, and justification. |
-| `report.docx` | Report exported to Word format (generated from `report.md` via `md_to_docx.py`). |
-| `md_to_docx.py` | Python utility to convert `report.md` into a formatted `.docx` file. Requires `python-docx`. |
 
 ## Auction System
 
@@ -57,11 +55,3 @@ The analytical queries recommend **Bellflower** and **Burbank**, California base
 1. Open `auction.sql` in SQL Server Management Studio (SSMS)
 2. Execute against the `AdventureWorks` database
 3. The script creates the schema, tables, stored procedures, and runs the analytical queries
-
-To regenerate the Word report:
-
-```bash
-python md_to_docx.py
-```
-
-Requires: `pip install python-docx`
