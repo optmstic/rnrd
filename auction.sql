@@ -69,7 +69,7 @@ BEGIN
         StartDate       DATETIME     NOT NULL DEFAULT GETDATE(),
         ExpireDate      DATETIME     NOT NULL,
         AuctionStatus   VARCHAR(20)  NOT NULL DEFAULT 'Active'
-            CHECK (AuctionStatus IN ('Active', 'Cancelled', 'Closed')),
+            CHECK (AuctionStatus IN ('Active', 'Cancelled', 'FINISHED by TIME', 'FINISHED by PRICE')),
         MaxBidPrice     MONEY        NOT NULL,
         CONSTRAINT FK_AuctionProduct_Product FOREIGN KEY (ProductID) REFERENCES Production.Product(ProductID)
     );
@@ -84,7 +84,8 @@ BEGIN
         AuctionID   INT          NOT NULL,
         CustomerID  INT          NOT NULL,
         BidValue    MONEY        NOT NULL,
-        BidStatus   VARCHAR(20)  NOT NULL DEFAULT 'Active',
+        BidStatus   VARCHAR(20)  NOT NULL DEFAULT 'Active'
+            CHECK (BidStatus IN ('Active', 'Inactive', 'Cancelled', 'Winner', 'Lost')),
         BidDate     DATETIME     NOT NULL DEFAULT GETDATE(),
         CONSTRAINT FK_Bids_Auction  FOREIGN KEY (AuctionID)  REFERENCES Auction.Product(AuctionID),
         CONSTRAINT FK_Bids_Customer FOREIGN KEY (CustomerID) REFERENCES Sales.Customer(CustomerID)
@@ -142,7 +143,7 @@ BEGIN
         DECLARE @MaxBidPrice MONEY = @ListPrice * @MaxBidMultiplier;
 
         INSERT INTO Auction.Product (ProductID, InitialBidPrice, LastBidPrice, StartDate, ExpireDate, AuctionStatus, MaxBidPrice)
-        VALUES (@ProductID, @InitialBidPrice, @InitialBidPrice, GETDATE(), @ExpireDate, 'Active', @MaxBidPrice);
+        VALUES (@ProductID, @InitialBidPrice, NULL, GETDATE(), @ExpireDate, 'Active', @MaxBidPrice);
 
     END TRY
     BEGIN CATCH
@@ -209,8 +210,10 @@ BEGIN
 
             IF @BidAmount = @MaxBidPrice
             BEGIN
-                UPDATE Auction.Product SET AuctionStatus = 'Closed' WHERE AuctionID = @AuctionID;
+                UPDATE Auction.Product SET AuctionStatus = 'FINISHED by PRICE' WHERE AuctionID = @AuctionID;
                 UPDATE Auction.Bids SET BidStatus = 'Winner' WHERE AuctionID = @AuctionID AND BidValue = @BidAmount;
+                UPDATE Auction.Bids SET BidStatus = 'Lost'
+                WHERE AuctionID = @AuctionID AND BidStatus IN ('Active', 'Inactive');
             END
         COMMIT TRANSACTION;
 
@@ -295,14 +298,14 @@ BEGIN
     BEGIN TRY
         BEGIN TRANSACTION;
             -- Close expired auctions
-            UPDATE Auction.Product SET AuctionStatus = 'Closed'
+            UPDATE Auction.Product SET AuctionStatus = 'FINISHED by TIME'
             WHERE AuctionStatus = 'Active' AND ExpireDate < GETDATE();
 
             -- Mark highest bidder as winner
             UPDATE B SET BidStatus = 'Winner'
             FROM Auction.Bids B
             INNER JOIN Auction.Product P ON B.AuctionID = P.AuctionID
-            WHERE P.AuctionStatus = 'Closed' AND B.BidStatus = 'Active'
+            WHERE P.AuctionStatus = 'FINISHED by TIME' AND B.BidStatus = 'Active'
               AND B.BidValue = P.LastBidPrice
               AND B.BidDate = (SELECT MAX(B2.BidDate) FROM Auction.Bids B2
                                WHERE B2.AuctionID = B.AuctionID AND B2.BidValue = P.LastBidPrice);
@@ -311,7 +314,7 @@ BEGIN
             UPDATE B SET BidStatus = 'Lost'
             FROM Auction.Bids B
             INNER JOIN Auction.Product P ON B.AuctionID = P.AuctionID
-            WHERE P.AuctionStatus = 'Closed' AND B.BidStatus IN ('Active', 'Inactive');
+            WHERE P.AuctionStatus = 'FINISHED by TIME' AND B.BidStatus IN ('Active', 'Inactive');
         COMMIT TRANSACTION;
 
     END TRY
@@ -351,29 +354,61 @@ WHERE SP.CountryRegionCode = 'US';
 GO
 
 -- Temp table: top 2 candidate cities (reused in 4.4, 4.5)
+-- Uses 3-digit ZIP prefix as a metro-area proxy to ensure geographic spread.
+-- Cities whose ZIP prefixes differ by <= 20 are treated as the same metro area
+-- (e.g. LA 900-935 stays together, SF 941+ is separate).
+-- Pick 1: highest revenue city. Pick 2: highest revenue outside Pick 1's metro.
 IF OBJECT_ID('tempdb..#TopCandidates') IS NOT NULL DROP TABLE #TopCandidates;
 
-SELECT TOP 2 A.City, SP.Name AS StateName
+WITH CityFinancials AS (
+    SELECT A.City, SP.Name AS StateName,
+           SUM(SOH.TotalDue) AS TotalRevenue
+    FROM Sales.Customer C
+    INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
+    INNER JOIN Person.Address A ON SOH.ShipToAddressID = A.AddressID
+    INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
+    WHERE SP.CountryRegionCode = 'US' AND C.StoreID IS NULL
+      AND NOT EXISTS (SELECT 1 FROM #ExcludedCities EC WHERE EC.City = A.City AND EC.StateName = SP.Name)
+    GROUP BY A.City, SP.Name
+    HAVING (SELECT COUNT(DISTINCT PC.Name)
+            FROM Sales.SalesOrderHeader SOH2
+            INNER JOIN Sales.Customer C2 ON SOH2.CustomerID = C2.CustomerID AND C2.StoreID IS NULL
+            INNER JOIN Person.Address A2 ON SOH2.ShipToAddressID = A2.AddressID
+            INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
+            INNER JOIN Sales.SalesOrderDetail SOD ON SOH2.SalesOrderID = SOD.SalesOrderID
+            INNER JOIN Production.Product P ON SOD.ProductID = P.ProductID
+            INNER JOIN Production.ProductSubcategory PSC ON P.ProductSubcategoryID = PSC.ProductSubcategoryID
+            INNER JOIN Production.ProductCategory PC ON PSC.ProductCategoryID = PC.ProductCategoryID
+            WHERE A2.City = A.City AND SP2.Name = SP.Name) >= 3
+),
+CityWithZip AS (
+    SELECT CF.*,
+           (SELECT TOP 1 CAST(LEFT(A2.PostalCode, 3) AS INT)
+            FROM Person.Address A2
+            INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
+            WHERE A2.City = CF.City AND SP2.Name = CF.StateName
+            GROUP BY LEFT(A2.PostalCode, 3)
+            ORDER BY COUNT(*) DESC) AS ZipPrefix
+    FROM CityFinancials CF
+),
+Pick1 AS (
+    SELECT TOP 1 City, StateName, ZipPrefix
+    FROM CityWithZip ORDER BY TotalRevenue DESC
+),
+Pick2 AS (
+    SELECT TOP 1 CWZ.City, CWZ.StateName, CWZ.ZipPrefix
+    FROM CityWithZip CWZ
+    CROSS JOIN Pick1 P1
+    WHERE ABS(CWZ.ZipPrefix - P1.ZipPrefix) > 20
+    ORDER BY CWZ.TotalRevenue DESC
+)
+SELECT City, StateName
 INTO #TopCandidates
-FROM Sales.Customer C
-INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
-INNER JOIN Person.Address A ON SOH.ShipToAddressID = A.AddressID
-INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
-INNER JOIN Person.CountryRegion CR ON SP.CountryRegionCode = CR.CountryRegionCode
-WHERE CR.CountryRegionCode = 'US' AND C.StoreID IS NULL
-  AND NOT EXISTS (SELECT 1 FROM #ExcludedCities EC WHERE EC.City = A.City AND EC.StateName = SP.Name)
-GROUP BY A.City, SP.Name
-HAVING (SELECT COUNT(DISTINCT PC.Name)
-        FROM Sales.SalesOrderHeader SOH2
-        INNER JOIN Sales.Customer C2 ON SOH2.CustomerID = C2.CustomerID AND C2.StoreID IS NULL
-        INNER JOIN Person.Address A2 ON SOH2.ShipToAddressID = A2.AddressID
-        INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
-        INNER JOIN Sales.SalesOrderDetail SOD ON SOH2.SalesOrderID = SOD.SalesOrderID
-        INNER JOIN Production.Product P ON SOD.ProductID = P.ProductID
-        INNER JOIN Production.ProductSubcategory PSC ON P.ProductSubcategoryID = PSC.ProductSubcategoryID
-        INNER JOIN Production.ProductCategory PC ON PSC.ProductCategoryID = PC.ProductCategoryID
-        WHERE A2.City = A.City AND SP2.Name = SP.Name) >= 3
-ORDER BY SUM(SOH.TotalDue) DESC;
+FROM (
+    SELECT City, StateName FROM Pick1
+    UNION ALL
+    SELECT City, StateName FROM Pick2
+) R;
 GO
 
 -- 4.1 Top 30 US resellers by revenue
