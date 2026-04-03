@@ -43,12 +43,13 @@ Everything is delivered in a single idempotent T-SQL script that can be executed
 
 ## Store Expansion
 
-The analytical queries recommend **Bellflower** and **Burbank**, California based on:
+The analytical queries recommend **Bellflower** and **Berkeley**, California based on:
 
 1. Excluding cities with the top 30 US resellers
 2. Requiring sales in all 3 consumer-facing categories (Bikes, Clothing, Accessories)
 3. Ranking by total individual customer revenue
-4. Confirming growing yearly trends (2012–2014)
+4. Ensuring the stores aren't on the same area by zip code. 
+5. Confirming growing yearly trends (2012–2014)
 
 ## Usage
 
