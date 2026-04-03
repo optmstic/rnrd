@@ -99,7 +99,7 @@ The recommendation is based on five analytical steps, all implemented as T-SQL q
 
 **Step 2 — Exclude their cities.** The distinct US cities where these top 30 resellers have their registered business addresses are collected into the `#ExcludedCities` temp table. This ensures Adventure Works does not open a retail store in a city where it could compete directly with a top reseller.
 
-**Step 3 — Rank remaining cities and select top 2 with geographic spread.** All US cities with individual customer orders (`StoreID IS NULL`) are ranked by total revenue, excluding the cities from Step 2. A `HAVING` clause ensures only cities with sales in all three consumer-facing categories qualify. To avoid selecting two cities in the same metro area, the query applies a greedy approach using the ZIP-prefix proximity rule from the assumptions: pick the highest-revenue city first, then pick the next-best city whose 3-digit ZIP prefix differs by more than 20. A broader top-20 ranking is also displayed for context using `RANK()` window functions.
+**Step 3 — Rank remaining cities and select top 2 with geographic spread.** All US cities with individual customer orders (`StoreID IS NULL`) are ranked by total revenue, excluding the cities from Step 2. A `HAVING` clause ensures only cities with sales in all three consumer-facing categories qualify — cities that lack category diversity are excluded before ranking, so the revenue ranks only reflect cities that could viably support a full-range retail store. To avoid selecting two cities in the same metro area, the query applies an    approach using the ZIP-prefix proximity rule from the assumptions: pick the highest-revenue city first, then pick the next-best city whose 3-digit ZIP prefix differs by more than 20. A broader top-20 ranking is also displayed for context, with each city's 3-digit ZIP prefix shown to make the metro clustering visible.
 
 **Step 4 — Product category breakdown.** For the top 2 candidate cities, a breakdown of individual customer revenue by product category (Bikes, Clothing, Accessories) confirms the demand profile. This uses `SUM(IIF(...))` to pivot the categories into columns, producing one row per city.
 
@@ -115,18 +115,23 @@ The top 30 US resellers are concentrated in 29 distinct cities including Austin,
 
 Based on the analysis, the two recommended cities are:
 
-**1. Bellflower, California** (Greater Los Angeles area)
+**1. Bellflower, California** (Greater Los Angeles, ZIP prefix 907)
 - Total revenue from individual customers: $334018.09
 - Number of unique customers: 194
 - Number of orders: 243
 - Average order value: $1374.56
 
-**2. Berkeley, California** (San Francisco Bay Area)
+**2. Berkeley, California** (San Francisco Bay Area, ZIP prefix 947)
 - Total revenue from individual customers: $258138.46
-- Number of orders (last 3 years): 229
-- Revenue breakdown: Bikes $247942.88, Clothing $3361.24, Accessories $6834.34
+- Number of unique customers: 200
+- Number of orders: 242
+- Average order value: $1178.69
 
-Without the geographic spread constraint, the top two cities would be Bellflower and Burbank — both in Greater Los Angeles, only ~20 km apart. By applying the ZIP-prefix metro clustering, the second pick shifts to Berkeley in the Bay Area (~550 km away), sacrificing ~$47,000 in revenue compared to Burbank ($305,487.15) but gaining access to an entirely separate market.
+The query output includes each city's 3-digit ZIP prefix, which serves as a geographic proximity indicator. In the US postal system, the 3-digit prefix identifies a Sectional Center Facility — a regional processing area. Cities with prefixes within 20 of each other are in the same metropolitan zone. For example, Bellflower (907) and Burbank (915) differ by only 8, confirming they are in the same Greater Los Angeles metro. Berkeley (947) differs from Bellflower by 40, placing it clearly in a separate market — the San Francisco Bay Area, approximately 550 km to the north.
+
+Without the geographic spread constraint, the top two cities by revenue alone would be Bellflower and Burbank. By applying the ZIP-prefix proximity rule, the second pick shifts to Berkeley, sacrificing ~$47,000 in revenue compared to Burbank ($305,487.15) but accessing an entirely separate market.
+
+Both regions are well suited for a bicycle retailer. The Greater Los Angeles area has invested heavily in cycling infrastructure, including the LA River Bike Path near Bellflower and an expanding network of protected bike lanes across LA County. The San Francisco Bay Area is one of the most cycling-friendly regions in the US, with Berkeley in particular known for its bike-friendly streets, the Bay Trail network, and proximity to popular cycling routes in the East Bay hills and Marin County. This existing cycling culture in both regions aligns with Adventure Works' core product line and supports sustained demand for bicycles, clothing, and accessories.
 
 #### Product Category Demand
 
@@ -148,8 +153,6 @@ Bikes dominate revenue in both cities (~96%), which is expected given bicycles a
 | Berkeley | 2013 | 107 | $91615.40 |
 | Berkeley | 2014 | 99 | $91418.33 |
 
-Both cities show strong growth from 2012 to 2013 followed by stabilization in 2014. Bellflower grew 18.6% overall ($89,230 → $105,819) with order volume tripling from 33 to 101 and holding at 97. Berkeley shows steeper growth — revenue nearly doubled from $50,807 to $91,615 (80.3%) with orders surging from 23 to 107 — then held steady in 2014 ($91,418, 99 orders). This pattern of rapid expansion followed by retention, rather than decline, is a positive signal for retail investment in both markets.
-
 ### 3.5 Justification
 
 The two cities were selected based on the following criteria, applied in order:
@@ -160,6 +163,7 @@ The two cities were selected based on the following criteria, applied in order:
 4. **Geographic spread** — the ZIP-prefix clustering ensures the two stores serve independent markets (~550 km apart) rather than competing in the same metro.
 5. **Large customer base** — broad buyer base in both cities, not reliant on a few high-spending individuals.
 6. **Growing sales trend** — revenue grew consistently over 2012–2014 in both cities, confirming sustained demand.
+7. **Cycling infrastructure** — both regions have established cycling networks and bike-friendly culture, supporting the core product line.
 
 ## 4. Conclusion
 

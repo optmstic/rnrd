@@ -1,5 +1,5 @@
 -- =========================================================================================
--- auction.sql | Relational and Non-Relational Data Project 2026
+-- auction.sql | Relational and Non-Relational Data Project 2026 - Group L
 -- =========================================================================================
 -- INDEX
 --   1. Schema Creation
@@ -24,11 +24,11 @@
 USE AdventureWorks;
 GO
 
--- 0. Clean up previous version
-DROP TABLE IF EXISTS Auction.Bids;
-DROP TABLE IF EXISTS Auction.Product;
-DROP TABLE IF EXISTS Auction.Configuration;
-GO
+-- 0. Clean up previous version (uncomment to reset during development)
+-- DROP TABLE IF EXISTS Auction.Bids;
+-- DROP TABLE IF EXISTS Auction.Product;
+-- DROP TABLE IF EXISTS Auction.Configuration;
+-- GO
 
 -- 1. Schema
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'Auction')
@@ -329,7 +329,7 @@ GO
 -- 4. Brick and Mortar Store Recommendation
 -- =========================================================================================
 
--- Temp table: excluded cities (computed once, reused in 4.3, 4.4, 4.5)
+-- Temp table: excluded cities (cities of the top 30 US resellers)
 IF OBJECT_ID('tempdb..#ExcludedCities') IS NOT NULL DROP TABLE #ExcludedCities;
 
 SELECT DISTINCT A.City, SP.Name AS StateName
@@ -340,10 +340,9 @@ FROM (
     INNER JOIN Person.BusinessEntityAddress BEA ON S.BusinessEntityID = BEA.BusinessEntityID
     INNER JOIN Person.Address A ON BEA.AddressID = A.AddressID
     INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
-    INNER JOIN Person.CountryRegion CR ON SP.CountryRegionCode = CR.CountryRegionCode
     INNER JOIN Sales.Customer C ON C.StoreID = S.BusinessEntityID
     INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
-    WHERE CR.CountryRegionCode = 'US'
+    WHERE SP.CountryRegionCode = 'US'
     GROUP BY S.BusinessEntityID
     ORDER BY SUM(SOH.TotalDue) DESC
 ) T30
@@ -353,61 +352,57 @@ INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
 WHERE SP.CountryRegionCode = 'US';
 GO
 
--- Temp table: top 2 candidate cities (reused in 4.4, 4.5)
--- Uses 3-digit ZIP prefix as a metro-area proxy to ensure geographic spread.
--- Cities whose ZIP prefixes differ by <= 20 are treated as the same metro area
--- (e.g. LA 900-935 stays together, SF 941+ is separate).
--- Pick 1: highest revenue city. Pick 2: highest revenue outside Pick 1's metro.
+-- Temp table: eligible cities with financials and ZIP prefix
+IF OBJECT_ID('tempdb..#CityMetrics') IS NOT NULL DROP TABLE #CityMetrics;
+
+SELECT A.City, SP.Name AS StateName,
+       SUM(SOH.TotalDue) AS TotalRevenue,
+       COUNT(DISTINCT C.CustomerID) AS CustomerCount,
+       COUNT(DISTINCT SOH.SalesOrderID) AS OrderCount,
+       AVG(SOH.TotalDue) AS AvgOrderValue,
+       (SELECT TOP 1 CAST(LEFT(A2.PostalCode, 3) AS INT)
+        FROM Person.Address A2
+        INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
+        WHERE A2.City = A.City AND SP2.Name = SP.Name
+          AND A2.PostalCode LIKE '[0-9][0-9][0-9]%'
+        GROUP BY LEFT(A2.PostalCode, 3)
+        ORDER BY COUNT(*) DESC) AS ZipPrefix
+INTO #CityMetrics
+FROM Sales.Customer C
+INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
+INNER JOIN Person.Address A ON SOH.ShipToAddressID = A.AddressID
+INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
+WHERE SP.CountryRegionCode = 'US' AND C.StoreID IS NULL
+  AND NOT EXISTS (SELECT 1 FROM #ExcludedCities EC WHERE EC.City = A.City AND EC.StateName = SP.Name)
+GROUP BY A.City, SP.Name
+HAVING (SELECT COUNT(DISTINCT PC.Name)
+        FROM Sales.SalesOrderHeader SOH2
+        INNER JOIN Sales.Customer C2 ON SOH2.CustomerID = C2.CustomerID AND C2.StoreID IS NULL
+        INNER JOIN Person.Address A2 ON SOH2.ShipToAddressID = A2.AddressID
+        INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
+        INNER JOIN Sales.SalesOrderDetail SOD ON SOH2.SalesOrderID = SOD.SalesOrderID
+        INNER JOIN Production.Product P ON SOD.ProductID = P.ProductID
+        LEFT JOIN Production.ProductSubcategory PSC ON P.ProductSubcategoryID = PSC.ProductSubcategoryID
+        LEFT JOIN Production.ProductCategory PC ON PSC.ProductCategoryID = PC.ProductCategoryID
+        WHERE A2.City = A.City AND SP2.Name = SP.Name) >= 3;
+GO
+
+-- Temp table: top 2 candidate cities (metro-area spread)
 IF OBJECT_ID('tempdb..#TopCandidates') IS NOT NULL DROP TABLE #TopCandidates;
 
-WITH CityFinancials AS (
-    SELECT A.City, SP.Name AS StateName,
-           SUM(SOH.TotalDue) AS TotalRevenue
-    FROM Sales.Customer C
-    INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
-    INNER JOIN Person.Address A ON SOH.ShipToAddressID = A.AddressID
-    INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
-    WHERE SP.CountryRegionCode = 'US' AND C.StoreID IS NULL
-      AND NOT EXISTS (SELECT 1 FROM #ExcludedCities EC WHERE EC.City = A.City AND EC.StateName = SP.Name)
-    GROUP BY A.City, SP.Name
-    HAVING (SELECT COUNT(DISTINCT PC.Name)
-            FROM Sales.SalesOrderHeader SOH2
-            INNER JOIN Sales.Customer C2 ON SOH2.CustomerID = C2.CustomerID AND C2.StoreID IS NULL
-            INNER JOIN Person.Address A2 ON SOH2.ShipToAddressID = A2.AddressID
-            INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
-            INNER JOIN Sales.SalesOrderDetail SOD ON SOH2.SalesOrderID = SOD.SalesOrderID
-            INNER JOIN Production.Product P ON SOD.ProductID = P.ProductID
-            INNER JOIN Production.ProductSubcategory PSC ON P.ProductSubcategoryID = PSC.ProductSubcategoryID
-            INNER JOIN Production.ProductCategory PC ON PSC.ProductCategoryID = PC.ProductCategoryID
-            WHERE A2.City = A.City AND SP2.Name = SP.Name) >= 3
-),
-CityWithZip AS (
-    SELECT CF.*,
-           (SELECT TOP 1 CAST(LEFT(A2.PostalCode, 3) AS INT)
-            FROM Person.Address A2
-            INNER JOIN Person.StateProvince SP2 ON A2.StateProvinceID = SP2.StateProvinceID
-            WHERE A2.City = CF.City AND SP2.Name = CF.StateName
-            GROUP BY LEFT(A2.PostalCode, 3)
-            ORDER BY COUNT(*) DESC) AS ZipPrefix
-    FROM CityFinancials CF
-),
-Pick1 AS (
-    SELECT TOP 1 City, StateName, ZipPrefix
-    FROM CityWithZip ORDER BY TotalRevenue DESC
-),
-Pick2 AS (
-    SELECT TOP 1 CWZ.City, CWZ.StateName, CWZ.ZipPrefix
-    FROM CityWithZip CWZ
-    CROSS JOIN Pick1 P1
-    WHERE ABS(CWZ.ZipPrefix - P1.ZipPrefix) > 20
-    ORDER BY CWZ.TotalRevenue DESC
-)
-SELECT City, StateName
+DECLARE @Pick1Zip INT;
+SELECT TOP 1 @Pick1Zip = ZipPrefix FROM #CityMetrics ORDER BY TotalRevenue DESC;
+
+SELECT City, StateName, ZipPrefix
 INTO #TopCandidates
 FROM (
-    SELECT City, StateName FROM Pick1
+    SELECT TOP 1 City, StateName, ZipPrefix
+    FROM #CityMetrics ORDER BY TotalRevenue DESC
     UNION ALL
-    SELECT City, StateName FROM Pick2
+    SELECT TOP 1 City, StateName, ZipPrefix
+    FROM #CityMetrics
+    WHERE ABS(ZipPrefix - @Pick1Zip) > 20
+    ORDER BY TotalRevenue DESC
 ) R;
 GO
 
@@ -417,10 +412,9 @@ FROM Sales.Store S
 INNER JOIN Person.BusinessEntityAddress BEA ON S.BusinessEntityID = BEA.BusinessEntityID
 INNER JOIN Person.Address A ON BEA.AddressID = A.AddressID
 INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
-INNER JOIN Person.CountryRegion CR ON SP.CountryRegionCode = CR.CountryRegionCode
 INNER JOIN Sales.Customer C ON C.StoreID = S.BusinessEntityID
 INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
-WHERE CR.CountryRegionCode = 'US'
+WHERE SP.CountryRegionCode = 'US'
 GROUP BY S.BusinessEntityID, S.Name, A.City, SP.Name
 ORDER BY TotalSales DESC
 OFFSET 0 ROWS FETCH NEXT 30 ROWS ONLY;
@@ -431,22 +425,12 @@ SELECT * FROM #ExcludedCities ORDER BY City;
 GO
 
 -- 4.3 Candidate cities ranked by individual customer revenue
-SELECT A.City, SP.Name AS StateName,
-       COUNT(DISTINCT C.CustomerID) AS CustomerCount,
-       COUNT(DISTINCT SOH.SalesOrderID) AS OrderCount,
-       SUM(SOH.TotalDue) AS TotalRevenue,
-       AVG(SOH.TotalDue) AS AvgOrderValue,
-       RANK() OVER (ORDER BY SUM(SOH.TotalDue) DESC) AS RevenueRank,
-       RANK() OVER (ORDER BY COUNT(DISTINCT C.CustomerID) DESC) AS CustomerRank
-FROM Sales.Customer C
-INNER JOIN Sales.SalesOrderHeader SOH ON SOH.CustomerID = C.CustomerID
-INNER JOIN Person.Address A ON SOH.ShipToAddressID = A.AddressID
-INNER JOIN Person.StateProvince SP ON A.StateProvinceID = SP.StateProvinceID
-INNER JOIN Person.CountryRegion CR ON SP.CountryRegionCode = CR.CountryRegionCode
-WHERE CR.CountryRegionCode = 'US' AND C.StoreID IS NULL
-  AND NOT EXISTS (SELECT 1 FROM #ExcludedCities EC WHERE EC.City = A.City AND EC.StateName = SP.Name)
-GROUP BY A.City, SP.Name
-ORDER BY TotalRevenue DESC
+-- ZipPrefix: 3-digit postal code area. Cities within 20 of each other share a metro area.
+SELECT CM.City, CM.StateName, CM.ZipPrefix,
+       CM.TotalRevenue, CM.CustomerCount, CM.OrderCount, CM.AvgOrderValue,
+       RANK() OVER (ORDER BY CM.TotalRevenue DESC) AS RevenueRank
+FROM #CityMetrics CM
+ORDER BY CM.TotalRevenue DESC
 OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY;
 GO
 
